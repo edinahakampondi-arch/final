@@ -36,6 +36,11 @@ if (isset($_GET['logout']) && $_GET['logout'] == 1) {
 // Include database connection
 require_once '../connect.php';
 
+// Function to clean drug name by removing "Suppository"
+function cleanDrugName($drug_name) {
+    return trim(str_ireplace('Suppository', '', $drug_name));
+}
+
 // Get logged-in user's details
 $user_id = $_SESSION['user_id'];
 $user_department = mysqli_real_escape_string($conn, $_SESSION['department']);
@@ -62,27 +67,68 @@ if ($user_stmt === false) {
 }
 echo "<!-- Debug: id=$user_id, department=$user_department, name=$name -->";
 
-// Fetch total drugs count across all departments
-$result = mysqli_query($conn, "SELECT COUNT(*) AS total_drugs FROM drugs");
-if ($result) {
-    $row = mysqli_fetch_assoc($result);
-    $total_drugs = $row['total_drugs'];
+// ==============================
+// Fetch Department Drug Statistics
+// ==============================
+
+// 1️⃣ Total drugs in the department
+$sql_total = "SELECT COUNT(*) AS total_drugs FROM drugs WHERE department = ?";
+$stmt_total = mysqli_prepare($conn, $sql_total);
+if ($stmt_total) {
+    mysqli_stmt_bind_param($stmt_total, "s", $user_department);
+    mysqli_stmt_execute($stmt_total);
+    $result_total = mysqli_stmt_get_result($stmt_total);
+    $row_total = mysqli_fetch_assoc($result_total);
+    $total_drugs = $row_total['total_drugs'] ?? 0;
+    mysqli_stmt_close($stmt_total);
 } else {
     $total_drugs = 'Error';
     error_log("Database Error (total drugs): " . mysqli_error($conn));
-    echo "<p class='text-red-600 text-sm'>Database Error: " . mysqli_error($conn) . "</p>";
 }
 
-// Fetch critical stock across all departments (expiring within 30 days)
-$result_critical = mysqli_query($conn, "SELECT COUNT(*) AS critical_stock FROM drugs WHERE expiry_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY) AND expiry_date >= CURDATE()");
-if ($result_critical) {
-    $row_critical = mysqli_fetch_assoc($result_critical);
-    $critical_stock = $row_critical['critical_stock'];
+// 2️⃣ At-Risk Stock (Expired OR expiring within 2 months)
+$sql_at_risk = "
+    SELECT COUNT(*) AS at_risk_stock 
+    FROM drugs 
+    WHERE department = ? 
+    AND (expiry_date < CURDATE() OR expiry_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 2 MONTH))
+";
+$stmt_risk = mysqli_prepare($conn, $sql_at_risk);
+if ($stmt_risk) {
+    mysqli_stmt_bind_param($stmt_risk, "s", $user_department);
+    mysqli_stmt_execute($stmt_risk);
+    $result_risk = mysqli_stmt_get_result($stmt_risk);
+    $row_risk = mysqli_fetch_assoc($result_risk);
+    $at_risk_stock = $row_risk['at_risk_stock'] ?? 0;
+    mysqli_stmt_close($stmt_risk);
 } else {
-    $critical_stock = 'Error';
-    error_log("Database Error (critical stock): " . mysqli_error($conn));
-    echo "<p class='text-red-600 text-sm'>Database Error: " . mysqli_error($conn) . "</p>";
+    $at_risk_stock = 'Error';
+    error_log("Database Error (at-risk stock): " . mysqli_error($conn));
 }
+
+// 3️⃣ Safe Stock (Still valid for more than 2 months)
+$sql_safe = "
+    SELECT COUNT(*) AS safe_stock 
+    FROM drugs 
+    WHERE department = ? 
+    AND expiry_date > DATE_ADD(CURDATE(), INTERVAL 2 MONTH)
+";
+$stmt_safe = mysqli_prepare($conn, $sql_safe);
+if ($stmt_safe) {
+    mysqli_stmt_bind_param($stmt_safe, "s", $user_department);
+    mysqli_stmt_execute($stmt_safe);
+    $result_safe = mysqli_stmt_get_result($stmt_safe);
+    $row_safe = mysqli_fetch_assoc($result_safe);
+    $safe_stock = $row_safe['safe_stock'] ?? 0;
+    mysqli_stmt_close($stmt_safe);
+} else {
+    $safe_stock = 'Error';
+    error_log("Database Error (safe stock): " . mysqli_error($conn));
+}
+
+// Debug log for developer
+error_log("[$user_department] Total: $total_drugs | At-Risk: $at_risk_stock | Safe: $safe_stock");
+
 
 // Fetch drugs with available stock for Drug Borrowing and Check Out
 $query = "SELECT drug_name, current_stock FROM drugs WHERE department = ? AND current_stock > 0";
@@ -143,16 +189,16 @@ mysqli_stmt_close($stmt);
                 </div>
                 <div class="p-4 pt-0">
                     <div class="text-2xl font-bold text-blue-600"><?php echo htmlspecialchars($total_drugs); ?></div>
-                    <p class="text-xs text-gray-500">Across all departments</p>
+                    <p class="text-xs text-gray-500">In Paediatrics</p>
                 </div>
             </div>
             <div class="bg-white shadow-lg hover:shadow-xl transition-shadow rounded-lg">
                 <div class="flex flex-row items-center justify-between p-4">
-                    <h3 class="text-sm font-medium">Critical Stock</h3>
+                    <h3 class="text-sm font-medium">At Risk Stock </h3>
                     <i data-lucide="alert-triangle" class="h-4 w-4 text-red-600"></i>
                 </div>
                 <div class="p-4 pt-0">
-                    <div class="text-2xl font-bold text-red-600"><?php echo htmlspecialchars($critical_stock); ?></div>
+                    <div class="text-2xl font-bold text-red-600"><?php echo htmlspecialchars($at_risk_stock); ?></div>
                     <p class="text-xs text-gray-500">Require immediate attention</p>
                 </div>
             </div>
@@ -176,16 +222,36 @@ mysqli_stmt_close($stmt);
                     <p class="text-xs text-gray-500">Connected units</p>
                 </div>
             </div>
-            <div class="bg-white shadow-lg hover:shadow-xl transition-shadow rounded-lg">
+            <!-- Demand Forecast Card -->
+            <div id="forecastCard" onclick="window.location.href='predict.php';"
+                class="bg-white shadow-lg hover:shadow-xl transition-shadow rounded-lg cursor-pointer">
                 <div class="flex flex-row items-center justify-between p-4">
-                    <h3 class="text-sm font-medium">Efficiency</h3>
-                    <i data-lucide="activity" class="h-4 w-4 text-purple-600"></i>
+                    <h3 class="text-sm font-medium">Demand Forecast</h3>
+                    <i data-lucide="trending-up" class="h-4 w-4 text-purple-600"></i>
                 </div>
                 <div class="p-4 pt-0">
-                    <div class="text-2xl font-bold text-purple-600">77%</div>
-                    <div class="w-full bg-gray-200 rounded-full h-2.5 mt-2">
-                        <div class="bg-purple-600 h-2.5 rounded-full" style="width: 77%"></div>
+                    <div class="text-2xl font-bold text-purple-600">AI</div>
+                    <p class="text-xs text-gray-500">Click to run predictions</p>
+                </div>
+            </div>
+
+            <!-- FORECAST MODAL (Required) -->
+            <div id="forecastModal"
+                class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center">
+                <div class="bg-white p-6 rounded-lg w-full max-w-2xl">
+                    <h2 class="text-xl font-semibold mb-4">Demand Forecast</h2>
+
+                    <div id="forecastOutput" class="hidden">
+                        <canvas id="forecastChart" height="120"></canvas>
+
+                        <div id="forecastResults" class="mt-4 text-sm text-gray-700"></div>
                     </div>
+
+                    <div id="forecastLoading" class="text-center hidden">
+                        <p class="text-purple-600">⏳ Loading forecast...</p>
+                    </div>
+
+                    <button id="closeForecast" class="mt-4 bg-gray-300 px-4 py-2 rounded">Close</button>
                 </div>
             </div>
         </section>
@@ -199,27 +265,78 @@ mysqli_stmt_close($stmt);
                 </h2>
             </div>
             <div class="p-4 pt-0 space-y-3">
-                <div class="border-l-4 border-red-500 bg-gray-50 p-4 rounded-r-lg">
-                    <div class="flex justify-between items-center">
-                        <span><strong>Paracetamol 500mg</strong> in Emergency - Stock: 5 units</span>
-                        <span class="bg-red-100 text-red-800 text-xs font-medium px-2.5 py-0.5 rounded">CRITICAL</span>
+                <?php
+        if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
+
+        include('connect.php');
+
+        // Check if department session is set
+        if (!isset($_SESSION['department'])) {
+            echo "<p class='text-red-500 font-medium'>Department not identified. Please log in again.</p>";
+            exit();
+        }
+
+        // Get department from session
+        $department = $_SESSION['department'];
+
+        // SQL query: critical drugs from THIS department only (expired or expiring within 30 days to match Critical Stock count)
+        $sql = "
+            SELECT drug_name, current_stock, expiry_date
+            FROM drugs
+            WHERE department = ?
+            AND (
+                expiry_date <= CURDATE()
+                OR expiry_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 30 DAY)
+            )
+            ORDER BY expiry_date ASC
+        ";
+
+        // Prepare and execute query with department filter
+        $stmt = $conn->prepare($sql);
+        $stmt->bind_param("s", $department);
+        $stmt->execute();
+        $result = $stmt->get_result();
+
+        // Check and display results
+        if ($result && $result->num_rows > 0) {
+            while ($row = $result->fetch_assoc()) {
+                $drug = htmlspecialchars(cleanDrugName($row['drug_name']));
+                $stock = htmlspecialchars($row['current_stock']);
+                $expiry = $row['expiry_date'];
+                $today = date('Y-m-d');
+
+                // Determine alert type
+                if ($expiry <= $today) {
+                    $border = "border-red-500";
+                    $bg = "bg-red-100 text-red-800";
+                    $label = "CRITICAL";
+                } else {
+                    $border = "border-orange-500";
+                    $bg = "bg-orange-100 text-orange-800";
+                    $label = "WARNING";
+                }
+
+                // Output alert card
+                echo "
+                <div class='border-l-4 $border bg-gray-50 p-4 rounded-r-lg'>
+                    <div class='flex justify-between items-center'>
+                        <span><strong>{$drug}</strong> - Stock: {$stock} units (Expires: {$expiry})</span>
+                        <span class='$bg text-xs font-medium px-2.5 py-0.5 rounded'>{$label}</span>
                     </div>
                 </div>
-                <div class="border-l-4 border-orange-500 bg-gray-50 p-4 rounded-r-lg">
-                    <div class="flex justify-between items-center">
-                        <span><strong>Amoxicillin</strong> in Pediatrics - Stock: 12 units</span>
-                        <span
-                            class="bg-orange-100 text-orange-800 text-xs font-medium px-2.5 py-0.5 rounded">WARNING</span>
-                    </div>
-                </div>
-                <div class="border-l-4 border-blue-500 bg-gray-50 p-4 rounded-r-lg">
-                    <div class="flex justify-between items-center">
-                        <span><strong>Insulin</strong> in Endocrinology - Stock: 25 units</span>
-                        <span class="bg-blue-100 text-blue-800 text-xs font-medium px-2.5 py-0.5 rounded">INFO</span>
-                    </div>
-                </div>
+                ";
+            }
+        } else {
+            echo "<p class='text-gray-500 italic'>No critical stock alerts for {$department} at the moment.</p>";
+        }
+
+        $stmt->close();
+        ?>
             </div>
         </section>
+
 
         <!-- Main Navigation Tabs -->
         <div class="space-y-5">
@@ -290,20 +407,22 @@ mysqli_stmt_close($stmt);
                                 echo "<p class='text-gray-600'>No drugs found for your department.</p>";
                             } else {
                                 while ($row = $result->fetch_assoc()) {
-                                    $status = $row['current_stock'] < $row['min_stock'] ? 'LOW' : 'NORMAL';
-                                    $status_color = $row['current_stock'] < $row['min_stock'] ? 'bg-red-100 text-red-800 border-red-200' : 'bg-green-100 text-green-800 border-green-200';
-                                    $trend_icon = $row['current_stock'] < $row['min_stock'] ? 'trending-down' : 'trending-up';
-                                    $trend_color = $row['current_stock'] < $row['min_stock'] ? 'text-red-600' : 'text-green-600';
-                                    // Calculate stock level if not set or invalid
-                                    $stock_level = ($row['stock_level'] > 0 && $row['stock_level'] <= 100) ? $row['stock_level'] : ($row['max_stock'] > 0 ? round(($row['current_stock'] / $row['max_stock']) * 100) : 0);
+                                    $status = $row['current_stock'] > 0 ? 'NORMAL' : 'OUT OF STOCK';
+                                    $status_color = $row['current_stock'] > 0 ? 'bg-green-100 text-green-800 border-green-200' : 'bg-red-100 text-red-800 border-red-200';
+                                    $trend_icon = $row['current_stock'] > 0 ? 'trending-up' : 'trending-down';
+                                    $trend_color = $row['current_stock'] > 0 ? 'text-green-600' : 'text-red-600';
+                                    // Stock level defaults to 100 if not set or doesn't exist
+                                    $stock_level = (isset($row['stock_level']) && $row['stock_level'] > 0 && $row['stock_level'] <= 100) ? $row['stock_level'] : 100;
+                                    // Category defaults to empty string if not set
+                                    $category = isset($row['category']) && !empty($row['category']) ? $row['category'] . ' • ' : '';
                             ?>
                             <div class="bg-white rounded-lg shadow hover:shadow-md transition-shadow p-6">
                                 <div class="flex justify-between items-start mb-4">
                                     <div>
                                         <h3 class="font-semibold text-lg">
-                                            <?php echo htmlspecialchars($row['drug_name']); ?></h3>
+                                            <?php echo htmlspecialchars(cleanDrugName($row['drug_name'])); ?></h3>
                                         <p class="text-sm text-gray-600">
-                                            <?php echo htmlspecialchars($row['category'] . ' • ' . $row['department']); ?>
+                                            <?php echo htmlspecialchars($category . $row['department']); ?>
                                         </p>
                                     </div>
                                     <div class="flex items-center gap-2">
@@ -313,15 +432,10 @@ mysqli_stmt_close($stmt);
                                             class="h-4 w-4 <?php echo $trend_color; ?>"></i>
                                     </div>
                                 </div>
-                                <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
                                     <div>
                                         <p class="text-sm text-gray-600">Current Stock</p>
                                         <p class="text-2xl font-bold"><?php echo $row['current_stock']; ?></p>
-                                    </div>
-                                    <div>
-                                        <p class="text-sm text-gray-600">Stock Range</p>
-                                        <p class="text-sm">
-                                            <?php echo $row['min_stock'] . ' - ' . $row['max_stock'] . ' units'; ?></p>
                                     </div>
                                     <div>
                                         <p class="text-sm text-gray-600">Expiry Date</p>
@@ -415,96 +529,35 @@ mysqli_stmt_close($stmt);
             <!-- Tab Content: Forecasting -->
             <section id="forecasting" class="tab-content hidden">
                 <div class="bg-white shadow-lg rounded-lg p-4">
-                    <h2 class="text-xl font-semibold">Demand Forecasting</h2>
-                    <div id="forecast-results" class="mt-4 p-4 bg-gray-50 border rounded">
-                        <p class="text-gray-600">Loading forecast...</p>
+                    <h2 class="text-xl font-semibold mb-4">Demand Forecasting - Top Drugs (Next 3 Months)</h2>
+                    <p class="text-sm text-gray-600 mb-4">Showing drugs with highest predicted demand in <?php echo htmlspecialchars($user_department); ?> department</p>
+                    <div id="forecast-loading" class="text-center py-8">
+                        <p class="text-blue-600">⏳ Loading forecast predictions...</p>
+                    </div>
+                    <div id="forecast-results" class="hidden">
+                        <div class="overflow-x-auto">
+                            <table class="w-full border-collapse border border-gray-300">
+                                <thead>
+                                    <tr class="bg-blue-100">
+                                        <th class="border border-gray-300 px-4 py-2 text-left">Rank</th>
+                                        <th class="border border-gray-300 px-4 py-2 text-left">Drug Name</th>
+                                        <th class="border border-gray-300 px-4 py-2 text-right">Current Stock</th>
+                                        <th class="border border-gray-300 px-4 py-2 text-right">Month 1</th>
+                                        <th class="border border-gray-300 px-4 py-2 text-right">Month 2</th>
+                                        <th class="border border-gray-300 px-4 py-2 text-right">Month 3</th>
+                                        <th class="border border-gray-300 px-4 py-2 text-right font-bold">Total (3 Months)</th>
+                                        <th class="border border-gray-300 px-4 py-2 text-center">Method</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="forecast-table-body">
+                                </tbody>
+                            </table>
+                        </div>
+                        <p id="forecast-empty" class="text-gray-600 text-center py-4 hidden">No forecast data available.</p>
                     </div>
                 </div>
             </section>
 
-            <!-- <script>
-$(document).ready(function() {
-    function loadForecast() {
-        $.ajax({
-            url: "http://127.0.0.1:5000/forecast", // Flask API
-            method: "GET",
-            success: function(data) {
-                let html = "<h3 class='text-lg font-bold mb-2'>Drug Demand Forecast</h3>";
-                html += "<table class='w-full text-sm border'>";
-                html += "<tr class='bg-blue-100'><th class='border p-2'>Drug</th><th class='border p-2'>Predicted Demand</th></tr>";
-
-                if (Array.isArray(data)) {
-                    data.forEach(item => {
-                        html += `<tr>
-                                    <td class='border p-2'>${item.drug}</td>
-                                    <td class='border p-2'>${item.forecast}</td>
-                                </tr>`;
-                    });
-                } else {
-                    html += `<tr><td colspan='2' class='border p-2 text-center'>No forecast available</td></tr>`;
-                }
-
-                html += "</table>";
-                $("#forecast-results").html(html);
-            },
-            error: function(xhr, status, error) {
-                console.error("Forecast load error:", error);
-                $("#forecast-results").html("<p class='text-red-600'>Error loading forecast data.</p>");
-            }
-        });
-    }
-
-    // Load forecast automatically
-    loadForecast();
-});
-</script> -->
-            <script>
-            function loadForecast() {
-                const payload = {
-                    drug_id: 1,
-                    drug_name: "Paracetamol",
-                    department: "Paediatrics"
-                };
-
-                $.ajax({
-                    url: "http://127.0.0.1:5000/forecast",
-                    method: "POST",
-                    contentType: "application/json",
-                    data: JSON.stringify(payload),
-                    success: function(data) {
-                        let html = "<h3 class='text-lg font-bold mb-2'>Drug Demand Forecast</h3>";
-                        html += "<table class='w-full text-sm border'>";
-                        html +=
-                            "<tr class='bg-blue-100'><th class='border p-2'>Drug</th><th class='border p-2'>Predicted Demand</th></tr>";
-
-                        if (data.forecasts && Array.isArray(data.forecasts)) {
-                            data.forecasts.forEach(item => {
-                                html += `<tr>
-                         <td class='border p-2'>${item.DrugName}</td>
-                            <td class='border p-2'>${item.PredictedDemand}</td>
-                        </tr>`;
-                            });
-                        } else {
-                            html +=
-                                `<tr><td colspan='2' class='border p-2 text-center'>No forecast available</td></tr>`;
-                        }
-
-                        html += "</table>";
-                        $("#forecast-results").html(html);
-                    },
-                    error: function(xhr, status, error) {
-                        console.error("Forecast load error:", error);
-                        $("#forecast-results").html(
-                            "<p class='text-red-600'>Error loading forecast data.</p>");
-                    }
-                });
-            }
-
-            $(document).ready(function() {
-                // Load forecast when page loads
-                loadForecast();
-            });
-            </script>
 
 
             <!-- Tab Content: Drug Borrowing -->
@@ -520,17 +573,8 @@ $(document).ready(function() {
                                     value="<?php echo htmlspecialchars($_SESSION['csrf_token']); ?>">
                                 <div>
                                     <label class="text-sm font-medium block mb-1">Drug</label>
-                                    <select name="drug" class="w-full border rounded px-3 py-2" required>
-                                        <option value="">Select drug</option>
-                                        <?php
-                                        $query = "SELECT drug_name, current_stock FROM drugs WHERE current_stock > 0";
-                                        $result = mysqli_query($conn, $query);
-                                        if ($result && mysqli_num_rows($result) > 0) {
-                                            while ($row = mysqli_fetch_assoc($result)) {
-                                                echo '<option value="' . htmlspecialchars($row['drug_name']) . '">' . htmlspecialchars($row['drug_name']) . '</option>';
-                                            }
-                                        }
-                                        ?>
+                                    <select name="drug" id="borrowing-drug-select" class="w-full border rounded px-3 py-2" required>
+                                        <option value="">Select department first</option>
                                     </select>
                                 </div>
                                 <div>
@@ -540,19 +584,26 @@ $(document).ready(function() {
                                 </div>
                                 <div>
                                     <label class="text-sm font-medium block mb-1">From Department</label>
-                                    <select name="from_department" class="w-full border rounded px-3 py-2" required>
+                                    <select name="from_department" id="from-department-select" class="w-full border rounded px-3 py-2" required>
                                         <option value="">Select department</option>
                                         <?php
-                                        $dept_query = "SELECT DISTINCT department FROM drugs WHERE current_stock > 0";
-                                        $dept_result = mysqli_query($conn, $dept_query);
-                                        if ($dept_result && mysqli_num_rows($dept_result) > 0) {
-                                            while ($dept = mysqli_fetch_assoc($dept_result)) {
-                                                if (in_array($dept['department'], ['Internal Medicine', 'Surgery', 'Paediatrics', 'Obstetrics', 'Gynaecology', 'Admin'])) {
-                                                    echo '<option>' . htmlspecialchars($dept['department']) . '</option>';
+                                        $dept_query = "SELECT DISTINCT department FROM drugs WHERE current_stock > 0 AND department != ?";
+                                        $dept_stmt = mysqli_prepare($conn, $dept_query);
+                                        if ($dept_stmt) {
+                                            mysqli_stmt_bind_param($dept_stmt, "s", $user_department);
+                                            mysqli_stmt_execute($dept_stmt);
+                                            $dept_result = mysqli_stmt_get_result($dept_stmt);
+                                            if ($dept_result && mysqli_num_rows($dept_result) > 0) {
+                                                while ($dept = mysqli_fetch_assoc($dept_result)) {
+                                                    $dept_name = $dept['department'];
+                                                    if ($dept_name && $dept_name != $user_department) {
+                                                        echo '<option value="' . htmlspecialchars($dept_name) . '">' . htmlspecialchars($dept_name) . '</option>';
+                                                    }
                                                 }
                                             }
+                                            mysqli_stmt_close($dept_stmt);
                                         } else {
-                                            echo '<option value="">No departments with stock available</option>';
+                                            echo '<option value="">Error loading departments</option>';
                                         }
                                         ?>
                                     </select>
@@ -566,7 +617,7 @@ $(document).ready(function() {
                             <h2 class="text-lg font-bold text-green-600 mb-4">📦 Available Supplies</h2>
                             <div class="space-y-3">
                                 <?php
-                                $query = "SELECT drug_name, department, current_stock, expiry_date, min_stock, max_stock FROM drugs WHERE current_stock > 0";
+                                $query = "SELECT drug_name, department, current_stock, expiry_date FROM drugs WHERE current_stock > 0";
                                 $result = mysqli_query($conn, $query);
                                 if ($result && mysqli_num_rows($result) > 0) {
                                     while ($row = mysqli_fetch_assoc($result)) {
@@ -574,7 +625,7 @@ $(document).ready(function() {
                                 <div class="border rounded p-4 shadow-sm">
                                     <div class="flex justify-between items-center">
                                         <h3 class="font-semibold text-gray-800">
-                                            <?php echo htmlspecialchars($row['drug_name']); ?></h3>
+                                            <?php echo htmlspecialchars(cleanDrugName($row['drug_name'])); ?></h3>
                                         <h3 class="font-semibold text-gray-800">
                                             <?php echo htmlspecialchars($row['department']); ?></h3>
                                         <p class="text-sm text-gray-600"><?php echo intval($row['current_stock']); ?>
@@ -582,9 +633,6 @@ $(document).ready(function() {
                                     </div>
                                     <p class="text-sm text-gray-600">Expiry:
                                         <?php echo htmlspecialchars($row['expiry_date']); ?></p>
-                                    <p class="text-sm text-gray-600">Stock Range:
-                                        <?php echo htmlspecialchars($row['min_stock'] . ' - ' . $row['max_stock']); ?>
-                                        units</p>
                                 </div>
                                 <?php
                                     }
@@ -626,9 +674,10 @@ $(document).ready(function() {
                                             required>
                                             <option value="">Select drug</option>
                                             <?php foreach ($drugs as $drug): ?>
+                                            <?php $clean_drug_name = cleanDrugName($drug['drug_name']); ?>
                                             <option value="<?php echo htmlspecialchars($drug['drug_name']); ?>"
                                                 data-stock="<?php echo htmlspecialchars($drug['current_stock']); ?>">
-                                                <?php echo htmlspecialchars($drug['drug_name']); ?> (Stock:
+                                                <?php echo htmlspecialchars($clean_drug_name); ?> (Stock:
                                                 <?php echo htmlspecialchars($drug['current_stock']); ?>)
                                             </option>
                                             <?php endforeach; ?>
@@ -661,34 +710,67 @@ $(document).ready(function() {
                             <p class="text-sm text-gray-500">Last recent checkouts from your department</p>
                             <div class="space-y-4 mt-4 max-h-60 overflow-y-auto" id="checkout-log">
                                 <?php
+                                // Initialize checkouts array
+                                $checkouts = [];
+                                
                                 // Verify connection
                                 if (!$conn) {
                                     error_log("Database connection failed: " . mysqli_connect_error());
                                     echo "<p class='text-red-600 text-sm'>Database connection error.</p>";
                                 } else {
-                                    $checkout_query = "SELECT drug_name, quantity, name, checkout_time FROM drug_checkouts WHERE department = ? ORDER BY checkout_time DESC LIMIT 100";
-                                    $checkout_stmt = mysqli_prepare($conn, $checkout_query);
-                                    if ($checkout_stmt === false) {
-                                        error_log("Prepare failed for checkout query: " . mysqli_error($conn));
-                                        echo "<p class='text-red-600 text-sm'>Query preparation error: " . mysqli_error($conn) . "</p>";
-                                    } else {
-                                        mysqli_stmt_bind_param($checkout_stmt, "s", $user_department);
-                                        mysqli_stmt_execute($checkout_stmt);
-                                        $result = mysqli_stmt_get_result($checkout_stmt);
-                                        $checkouts = [];
-                                        if ($result && mysqli_num_rows($result) > 0) {
-                                            while ($row = mysqli_fetch_assoc($result)) {
-                                                $checkouts[] = $row;
-                                            }
+                                    // Check table structure to determine which columns exist
+                                    $describe_query = "DESCRIBE drug_checkouts";
+                                    $desc_result = mysqli_query($conn, $describe_query);
+                                    $columns = [];
+                                    if ($desc_result) {
+                                        while ($desc_row = mysqli_fetch_assoc($desc_result)) {
+                                            $columns[] = $desc_row['Field'];
                                         }
-                                        mysqli_stmt_close($checkout_stmt);
-
-                                        foreach ($checkouts as $checkout): ?>
+                                    }
+                                    
+                                    $has_drug_name = in_array('drug_name', $columns);
+                                    $has_quantity = in_array('quantity', $columns);
+                                    $has_quantity_dispensed = in_array('quantity_dispensed', $columns);
+                                    $has_drug_id = in_array('drug_id', $columns);
+                                    
+                                    // Build query based on available columns
+                                    if ($has_drug_name && $has_quantity) {
+                                        $checkout_query = "SELECT drug_name, quantity, name, checkout_time FROM drug_checkouts WHERE department = ? ORDER BY checkout_time DESC LIMIT 100";
+                                    } elseif ($has_drug_name && $has_quantity_dispensed) {
+                                        $checkout_query = "SELECT drug_name, quantity_dispensed as quantity, name, checkout_time FROM drug_checkouts WHERE department = ? ORDER BY checkout_time DESC LIMIT 100";
+                                    } elseif ($has_drug_id && $has_quantity_dispensed) {
+                                        $checkout_query = "SELECT d.drug_name, dc.quantity_dispensed as quantity, dc.name, dc.checkout_time FROM drug_checkouts dc INNER JOIN drugs d ON dc.drug_id = d.drug_id WHERE dc.department = ? ORDER BY dc.checkout_time DESC LIMIT 100";
+                                    } else {
+                                        echo "<p class='text-red-600 text-sm'>Unknown table structure for drug_checkouts.</p>";
+                                        $checkout_stmt = false;
+                                    }
+                                    
+                                    if (isset($checkout_query)) {
+                                        $checkout_stmt = mysqli_prepare($conn, $checkout_query);
+                                        if ($checkout_stmt === false) {
+                                            error_log("Prepare failed for checkout query: " . mysqli_error($conn));
+                                            echo "<p class='text-red-600 text-sm'>Query preparation error: " . mysqli_error($conn) . "</p>";
+                                        } else {
+                                            mysqli_stmt_bind_param($checkout_stmt, "s", $user_department);
+                                            mysqli_stmt_execute($checkout_stmt);
+                                            $result = mysqli_stmt_get_result($checkout_stmt);
+                                            if ($result && mysqli_num_rows($result) > 0) {
+                                                while ($row = mysqli_fetch_assoc($result)) {
+                                                    $checkouts[] = $row;
+                                                }
+                                            }
+                                            mysqli_stmt_close($checkout_stmt);
+                                        }
+                                    }
+                                }
+                                
+                                if (!empty($checkouts)):
+                                            foreach ($checkouts as $checkout): ?>
                                 <div class="p-4 border rounded-lg bg-white shadow hover:shadow-md transition-shadow">
                                     <div class="flex justify-between items-start mb-2">
                                         <p class="text-sm text-gray-700">
                                             <strong>Drug:</strong>
-                                            <?php echo htmlspecialchars($checkout['drug_name']); ?>
+                                            <?php echo htmlspecialchars(cleanDrugName($checkout['drug_name'])); ?>
                                         </p>
                                         <p class="text-sm text-gray-500">
                                             <strong>Qty:</strong> <?php echo htmlspecialchars($checkout['quantity']); ?>
@@ -704,13 +786,11 @@ $(document).ready(function() {
                                         </p>
                                     </div>
                                 </div>
-                                <?php endforeach;
-                                        if (empty($checkouts)): ?>
+                                <?php 
+                                            endforeach;
+                                        else: ?>
                                 <p class="text-gray-600">No recent checkouts.</p>
-                                <?php endif;
-                                    }
-                                }
-                                ?>
+                                <?php endif; ?>
                             </div>
                         </div>
                     </div>
@@ -924,18 +1004,16 @@ $(document).ready(function() {
             data: $(this).serialize() + '&quantity=' + quantity,
             dataType: 'json',
             success: function(response) {
-                if (response.success) {
+                if (response && response.success) {
                     alert(response.success);
                     $('#checkout-form')[0].reset();
-                    // Force reload of checkout log
-                    $.get(document.URL, function(data) {
-                        const newLog = $(data).find('#checkout-log').html();
-                        $('#checkout-log').html(newLog);
-                    }).fail(function(xhr, status, error) {
-                        console.error('Log reload failed:', status, error, xhr
-                            .responseText);
-                        alert('Failed to update checkout log.');
-                    });
+                    // Reload checkouts after successful checkout
+                    if (typeof loadCheckouts === 'function') {
+                        setTimeout(loadCheckouts, 500);
+                    } else {
+                        // Fallback: reload page section
+                        location.reload();
+                    }
                 } else {
                     alert(response.error || 'Failed to check out drug.');
                 }
@@ -959,6 +1037,11 @@ $(document).ready(function() {
                 button.classList.add('bg-gray-100', 'text-gray-900');
                 const tabId = button.getAttribute('data-tab');
                 document.getElementById(tabId).classList.remove('hidden');
+                
+                // Load forecast data when forecasting tab is clicked
+                if (tabId === 'forecasting') {
+                    loadForecast();
+                }
             });
         });
 
@@ -971,6 +1054,142 @@ $(document).ready(function() {
         // Auto-update communications
         loadCommunications();
         setInterval(loadCommunications, 5000);
+
+        // Load Forecast Data
+        function loadForecast() {
+            $('#forecast-loading').removeClass('hidden');
+            $('#forecast-results').addClass('hidden');
+            $('#forecast-empty').addClass('hidden');
+            
+            $.ajax({
+                url: 'get_forecast_drugs.php',
+                type: 'GET',
+                dataType: 'json',
+                timeout: 120000,
+                success: function(response) {
+                    $('#forecast-loading').addClass('hidden');
+                    
+                    if (response.error) {
+                        $('#forecast-results').removeClass('hidden');
+                        $('#forecast-table-body').html(`<tr><td colspan="8" class="border border-gray-300 px-4 py-2 text-center text-red-600">${response.error}</td></tr>`);
+                        return;
+                    }
+                    
+                    if (!response.forecasts || response.forecasts.length === 0) {
+                        $('#forecast-results').removeClass('hidden');
+                        $('#forecast-empty').removeClass('hidden');
+                        return;
+                    }
+                    
+                    let html = '';
+                    response.forecasts.forEach((forecast, index) => {
+                        const cleanName = forecast.drug_name ? forecast.drug_name.replace(/Suppository/gi, '').trim() : forecast.drug_name;
+                        const stockClass = forecast.current_stock < forecast.total_demand ? 'text-red-600 font-bold' : 'text-gray-800';
+                        
+                        // Determine method badge based on method name
+                        let methodBadge = 'bg-gray-100 text-gray-800';
+                        const method = (forecast.method || '').toLowerCase();
+                        if (method.includes('autoets')) {
+                            methodBadge = 'bg-purple-100 text-purple-800';
+                        } else if (method.includes('holt') || method.includes('winters') || method.includes('exponential')) {
+                            methodBadge = 'bg-blue-100 text-blue-800';
+                        } else if (method.includes('trend') || method.includes('projection') || method.includes('linear') || method.includes('growth')) {
+                            methodBadge = 'bg-green-100 text-green-800';
+                        } else if (method.includes('minimal') || method.includes('mean')) {
+                            methodBadge = 'bg-yellow-100 text-yellow-800';
+                        }
+                        
+                        // Format method name for display
+                        const methodDisplay = forecast.method ? forecast.method.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()) : 'Unknown';
+                        
+                        html += `
+                            <tr class="hover:bg-gray-50">
+                                <td class="border border-gray-300 px-4 py-2 font-semibold">${index + 1}</td>
+                                <td class="border border-gray-300 px-4 py-2">${escapeHtml(cleanName)}</td>
+                                <td class="border border-gray-300 px-4 py-2 text-right ${stockClass}">${forecast.current_stock}</td>
+                                <td class="border border-gray-300 px-4 py-2 text-right">${forecast.month1}</td>
+                                <td class="border border-gray-300 px-4 py-2 text-right">${forecast.month2}</td>
+                                <td class="border border-gray-300 px-4 py-2 text-right">${forecast.month3}</td>
+                                <td class="border border-gray-300 px-4 py-2 text-right font-bold text-blue-600">${forecast.total_demand}</td>
+                                <td class="border border-gray-300 px-4 py-2 text-center"><span class="px-2 py-1 rounded text-xs ${methodBadge}">${methodDisplay}</span></td>
+                            </tr>
+                        `;
+                    });
+                    
+                    $('#forecast-table-body').html(html);
+                    $('#forecast-results').removeClass('hidden');
+                },
+                error: function(xhr, status, error) {
+                    $('#forecast-loading').addClass('hidden');
+                    $('#forecast-results').removeClass('hidden');
+                    $('#forecast-table-body').html(`<tr><td colspan="8" class="border border-gray-300 px-4 py-2 text-center text-red-600">Error loading forecast: ${error}. Please ensure the prediction API is running.</td></tr>`);
+                    console.error('Forecast load error:', status, error, xhr.responseText);
+                }
+            });
+        }
+
+        // Helper function to escape HTML
+        function escapeHtml(text) {
+            if (!text) return '';
+            const map = {
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#039;'
+            };
+            return text.replace(/[&<>"']/g, function(m) { return map[m]; });
+        }
+
+        // Populate drug dropdown when department is selected
+        $('#from-department-select').on('change', function() {
+            const department = $(this).val();
+            const drugSelect = $('#borrowing-drug-select');
+            
+            // Clear and reset drug dropdown
+            drugSelect.html('<option value="">Loading drugs...</option>');
+            
+            if (!department) {
+                drugSelect.html('<option value="">Select department first</option>');
+                return;
+            }
+            
+            // Fetch drugs from selected department
+            $.ajax({
+                url: 'fetch_drugs_by_department.php',
+                type: 'GET',
+                data: { department: department },
+                dataType: 'json',
+                success: function(data) {
+                    drugSelect.html('<option value="">Select drug</option>');
+                    if (data && Array.isArray(data) && data.length > 0) {
+                        data.forEach(function(drug) {
+                            const cleanName = drug.drug_name ? drug.drug_name.replace(/Suppository/gi, '').trim() : drug.drug_name;
+                            drugSelect.append(`<option value="${escapeHtml(drug.drug_name)}">${escapeHtml(cleanName)} (Stock: ${drug.current_stock})</option>`);
+                        });
+                    } else {
+                        drugSelect.html('<option value="">No drugs available in this department</option>');
+                    }
+                },
+                error: function(xhr, status, error) {
+                    console.error('Fetch drugs error:', status, error, xhr.responseText);
+                    drugSelect.html('<option value="">Error loading drugs</option>');
+                }
+            });
+        });
+
+        // Helper function to escape HTML
+        function escapeHtml(text) {
+            if (!text) return '';
+            const map = {
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#039;'
+            };
+            return text.replace(/[&<>"']/g, function(m) { return map[m]; });
+        }
 
         // Drug Borrowing AJAX
         $('#drug-form').on('submit', function(e) {
@@ -1162,6 +1381,62 @@ $(document).ready(function() {
         setInterval(updatePendingOrders, 5000);
 
         loadRequests();
+
+        // Load Checkouts function for dynamic updates
+        window.loadCheckouts = function() {
+            $.ajax({
+                url: 'fetch_checkouts.php',
+                type: 'GET',
+                data: {
+                    department: '<?php echo $user_department; ?>'
+                },
+                dataType: 'json',
+                success: function(data) {
+                    const container = $('#checkout-log');
+                    container.empty();
+                    
+                    // Check if response has error
+                    if (data && data.error) {
+                        console.error('Fetch checkouts error:', data.error);
+                        container.html('<p class="text-gray-600">No recent checkouts available.</p>');
+                        return;
+                    }
+                    
+                    // Check if data is an array
+                    if (data && Array.isArray(data) && data.length > 0) {
+                        data.forEach(checkout => {
+                            const cleanDrugName = checkout.drug_name ? checkout.drug_name.replace(/Suppository/gi, '').trim() : '';
+                            container.append(`
+                                <div class="p-4 border rounded-lg bg-white shadow hover:shadow-md transition-shadow">
+                                    <div class="flex justify-between items-start mb-2">
+                                        <p class="text-sm text-gray-700">
+                                            <strong>Drug:</strong> ${cleanDrugName}
+                                        </p>
+                                        <p class="text-sm text-gray-500">
+                                            <strong>Qty:</strong> ${checkout.quantity}
+                                        </p>
+                                    </div>
+                                    <div class="flex justify-between items-center">
+                                        <p class="text-xs text-gray-500">
+                                            <strong>User:</strong> ${checkout.name || 'Unknown'}
+                                        </p>
+                                        <p class="text-xs text-gray-500">
+                                            <strong>Time:</strong> ${checkout.checkout_time || 'N/A'}
+                                        </p>
+                                    </div>
+                                </div>
+                            `);
+                        });
+                    } else {
+                        container.html('<p class="text-gray-600">No recent checkouts.</p>');
+                    }
+                },
+                error: function(xhr, status, error) {
+                    console.error('Load checkouts error:', status, error, xhr.responseText);
+                    $('#checkout-log').html('<p class="text-gray-600">No recent checkouts available.</p>');
+                }
+            });
+        };
     });
     </script>
 </body>

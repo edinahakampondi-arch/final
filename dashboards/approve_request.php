@@ -22,51 +22,82 @@ if ($request_id <= 0) {
     exit;
 }
 
-$query = "SELECT drug_name, quantity, from_department, to_department, status, expiry_date, min_stock, max_stock 
-          FROM borrowing_requests WHERE id = $request_id";
-$result = mysqli_query($conn, $query);
+$query = "SELECT id, drug_name, quantity, from_department, to_department, status, expiry_date
+          FROM borrowing_requests WHERE id = ?";
+error_log("DEBUG: approve_request.php - Executing query: $query");
+
+$stmt = mysqli_prepare($conn, $query);
+if (!$stmt) {
+    $error = mysqli_error($conn);
+    error_log("Fetch Request Error: Failed to prepare query - " . $error);
+    error_log("DEBUG: approve_request.php - Connection status: " . (mysqli_ping($conn) ? 'OK' : 'FAILED'));
+    http_response_code(500);
+    echo json_encode(['error' => 'Database error: Failed to prepare query - ' . $error]);
+    exit;
+}
+mysqli_stmt_bind_param($stmt, "i", $request_id);
+mysqli_stmt_execute($stmt);
+$result = mysqli_stmt_get_result($stmt);
 if (!$result) {
+    mysqli_stmt_close($stmt);
     error_log("Fetch Request Error: " . mysqli_error($conn));
     http_response_code(500);
     echo json_encode(['error' => 'Database error: Failed to fetch request']);
     exit;
 }
 if (mysqli_num_rows($result) === 0) {
+    mysqli_stmt_close($stmt);
     http_response_code(400);
     echo json_encode(['error' => 'Request not found']);
     exit;
 }
 
 $request = mysqli_fetch_assoc($result);
+mysqli_stmt_close($stmt);
+
+// Debug logging for quantity tracking
+error_log("DEBUG: approve_request.php - Retrieved request: id={$request['request_id']}, quantity={$request['quantity']}, status={$request['status']}");
+
 if ($request['status'] !== 'Pending') {
     http_response_code(400);
     echo json_encode(['error' => 'Request already processed']);
     exit;
 }
 
-if ($_SESSION['department'] !== $request['from_department']) {
+// Admin can approve any request, otherwise only the lending department can approve
+if ($_SESSION['department'] !== 'Admin' && $_SESSION['department'] !== $request['from_department']) {
     http_response_code(403);
-    echo json_encode(['error' => 'Only the lending department can approve this request']);
+    echo json_encode(['error' => 'Only the lending department or Admin can approve this request']);
     exit;
 }
 
 $query = "SELECT current_stock FROM drugs 
-          WHERE drug_name = '" . mysqli_real_escape_string($conn, $request['drug_name']) . "' 
-          AND department = '" . mysqli_real_escape_string($conn, $request['from_department']) . "'";
-$result = mysqli_query($conn, $query);
-if (!$result) {
+          WHERE drug_name = ? AND department = ?";
+$stmt = mysqli_prepare($conn, $query);
+if (!$stmt) {
     error_log("Fetch Stock Error: " . mysqli_error($conn));
+    http_response_code(500);
+    echo json_encode(['error' => 'Database error: Failed to prepare stock query']);
+    exit;
+}
+mysqli_stmt_bind_param($stmt, "ss", $request['drug_name'], $request['from_department']);
+if (!mysqli_stmt_execute($stmt)) {
+    mysqli_stmt_close($stmt);
+    error_log("Fetch Stock Error: " . mysqli_stmt_error($stmt));
     http_response_code(500);
     echo json_encode(['error' => 'Database error: Failed to fetch stock']);
     exit;
 }
-if (mysqli_num_rows($result) === 0) {
+$result = mysqli_stmt_get_result($stmt);
+if (!$result || mysqli_num_rows($result) === 0) {
+    mysqli_stmt_close($stmt);
     http_response_code(400);
     echo json_encode(['error' => 'Drug not found in the lending department']);
     exit;
 }
 
 $row = mysqli_fetch_assoc($result);
+mysqli_stmt_close($stmt);
 if ($row['current_stock'] < $request['quantity']) {
     http_response_code(400);
     echo json_encode(['error' => 'Insufficient stock in the lending department']);
@@ -76,50 +107,95 @@ if ($row['current_stock'] < $request['quantity']) {
 mysqli_begin_transaction($conn);
 
 try {
+    // Log lending stock before update
+    $lending_stock_before = $row['current_stock'];
+    error_log("DEBUG: approve_request.php - Lending department '{$request['from_department']}' stock before update: {$lending_stock_before}");
+
     // Update lending department stock
-    $query = "UPDATE drugs SET current_stock = current_stock - {$request['quantity']} 
-              WHERE drug_name = '" . mysqli_real_escape_string($conn, $request['drug_name']) . "' 
-              AND department = '" . mysqli_real_escape_string($conn, $request['from_department']) . "'";
-    if (!mysqli_query($conn, $query)) {
-        throw new Exception('Failed to update lending department stock: ' . mysqli_error($conn));
+    $query = "UPDATE drugs SET current_stock = current_stock - ?
+              WHERE drug_name = ? AND department = ?";
+    $stmt = mysqli_prepare($conn, $query);
+    if (!$stmt) {
+        throw new Exception('Failed to prepare lending department update: ' . mysqli_error($conn));
     }
+    mysqli_stmt_bind_param($stmt, "iss", $request['quantity'], $request['drug_name'], $request['from_department']);
+    if (!mysqli_stmt_execute($stmt)) {
+        mysqli_stmt_close($stmt);
+        throw new Exception('Failed to update lending department stock: ' . mysqli_stmt_error($stmt));
+    }
+    mysqli_stmt_close($stmt);
+
+    error_log("DEBUG: approve_request.php - Deducted {$request['quantity']} from lending department '{$request['from_department']}'");
 
     // Check if drug exists in borrowing department
-    $query = "SELECT id FROM drugs 
-              WHERE drug_name = '" . mysqli_real_escape_string($conn, $request['drug_name']) . "' 
-              AND department = '" . mysqli_real_escape_string($conn, $request['to_department']) . "'";
-    $result = mysqli_query($conn, $query);
-    if (!$result) {
-        throw new Exception('Failed to check borrowing department stock: ' . mysqli_error($conn));
+    $query = "SELECT id FROM drugs
+              WHERE drug_name = ? AND department = ?";
+    $stmt = mysqli_prepare($conn, $query);
+    if (!$stmt) {
+        throw new Exception('Failed to prepare borrowing department check: ' . mysqli_error($conn));
     }
+    mysqli_stmt_bind_param($stmt, "ss", $request['drug_name'], $request['to_department']);
+    if (!mysqli_stmt_execute($stmt)) {
+        mysqli_stmt_close($stmt);
+        throw new Exception('Failed to check borrowing department stock: ' . mysqli_stmt_error($stmt));
+    }
+    $result = mysqli_stmt_get_result($stmt);
+    $drug_exists = mysqli_num_rows($result) > 0;
+    mysqli_stmt_close($stmt);
 
-    $expiry_date = $request['expiry_date'] ? "'".mysqli_real_escape_string($conn, $request['expiry_date'])."'" : 'NULL';
-    if (mysqli_num_rows($result) > 0) {
-        $query = "UPDATE drugs SET current_stock = current_stock + {$request['quantity']} 
-                  WHERE drug_name = '" . mysqli_real_escape_string($conn, $request['drug_name']) . "' 
-                  AND department = '" . mysqli_real_escape_string($conn, $request['to_department']) . "'";
+    if ($drug_exists) {
+        error_log("DEBUG: approve_request.php - Drug exists in borrowing department '{$request['to_department']}', adding {$request['quantity']} to existing stock");
+
+        // Update existing drug
+        $query = "UPDATE drugs SET current_stock = current_stock + ?
+                  WHERE drug_name = ? AND department = ?";
+        $stmt = mysqli_prepare($conn, $query);
+        if (!$stmt) {
+            throw new Exception('Failed to prepare borrowing department update: ' . mysqli_error($conn));
+        }
+        mysqli_stmt_bind_param($stmt, "iss", $request['quantity'], $request['drug_name'], $request['to_department']);
+        if (!mysqli_stmt_execute($stmt)) {
+            mysqli_stmt_close($stmt);
+            throw new Exception('Failed to update borrowing department stock: ' . mysqli_stmt_error($stmt));
+        }
+        mysqli_stmt_close($stmt);
+
+        error_log("DEBUG: approve_request.php - Added {$request['quantity']} to borrowing department '{$request['to_department']}' existing stock");
     } else {
-        $query = "INSERT INTO drugs (drug_name, department, current_stock, min_stock, max_stock, expiry_date, category, stock_level) 
-                  VALUES ('" . mysqli_real_escape_string($conn, $request['drug_name']) . "', 
-                          '" . mysqli_real_escape_string($conn, $request['to_department']) . "', 
-                          {$request['quantity']}, 
-                          {$request['min_stock']}, 
-                          {$request['max_stock']}, 
-                          $expiry_date, 
-                          'Unknown', 
-                          0)";
-    }
-    if (!mysqli_query($conn, $query)) {
-        throw new Exception('Failed to update borrowing department stock: ' . mysqli_error($conn));
+        error_log("DEBUG: approve_request.php - Drug does not exist in borrowing department '{$request['to_department']}', inserting new drug with quantity {$request['quantity']}");
+
+        // Insert new drug (without category and stock_level columns that were removed)
+        $query = "INSERT INTO drugs (drug_name, department, current_stock, expiry_date)
+                  VALUES (?, ?, ?, ?)";
+        $stmt = mysqli_prepare($conn, $query);
+        if (!$stmt) {
+            throw new Exception('Failed to prepare borrowing department insert: ' . mysqli_error($conn));
+        }
+        $expiry_date = $request['expiry_date'] ?: null;
+        mysqli_stmt_bind_param($stmt, "ssis", $request['drug_name'], $request['to_department'], $request['quantity'], $expiry_date);
+        if (!mysqli_stmt_execute($stmt)) {
+            mysqli_stmt_close($stmt);
+            throw new Exception('Failed to insert borrowing department drug: ' . mysqli_stmt_error($stmt));
+        }
+        mysqli_stmt_close($stmt);
+
+        error_log("DEBUG: approve_request.php - Inserted new drug in borrowing department '{$request['to_department']}' with quantity {$request['quantity']}");
     }
 
     // Update request status
     $approved_time = date('Y-m-d H:i:s');
-    $query = "UPDATE borrowing_requests SET status = 'Approved', approved_time = '$approved_time' 
-              WHERE id = $request_id";
-    if (!mysqli_query($conn, $query)) {
-        throw new Exception('Failed to update request status: ' . mysqli_error($conn));
+    $query = "UPDATE borrowing_requests SET status = 'Approved', approved_time = ?
+              WHERE id = ?";
+    $stmt = mysqli_prepare($conn, $query);
+    if (!$stmt) {
+        throw new Exception('Failed to prepare status update: ' . mysqli_error($conn));
     }
+    mysqli_stmt_bind_param($stmt, "si", $approved_time, $request_id);
+    if (!mysqli_stmt_execute($stmt)) {
+        mysqli_stmt_close($stmt);
+        throw new Exception('Failed to update request status: ' . mysqli_stmt_error($stmt));
+    }
+    mysqli_stmt_close($stmt);
 
     mysqli_commit($conn);
     echo json_encode(['success' => 'Request approved and stock updated']);

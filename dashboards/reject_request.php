@@ -37,14 +37,15 @@ if ($request['status'] !== 'Pending') {
     exit;
 }
 
-if ($_SESSION['department'] !== $request['from_department']) {
+// Admin can reject any request, otherwise only the lending department can reject
+if ($_SESSION['department'] !== 'Admin' && $_SESSION['department'] !== $request['from_department']) {
     http_response_code(403);
-    echo json_encode(['error' => 'Only the lending department can reject this request']);
+    echo json_encode(['error' => 'Only the lending department or Admin can reject this request']);
     exit;
 }
 
 $rejected_time = date('Y-m-d H:i:s');
-$query = "UPDATE borrowing_requests SET status = 'Rejected', approved_time = '$rejected_time' 
+$query = "UPDATE borrowing_requests SET status = 'Rejected', approved_time = '$rejected_time'
           WHERE id = $request_id";
 if (mysqli_query($conn, $query)) {
     echo json_encode(['success' => 'Request rejected successfully']);

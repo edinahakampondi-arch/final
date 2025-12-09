@@ -20,9 +20,9 @@ if (!$conn) {
 }
 
 // Prepare and execute query with error checking
-$query = "SELECT id, from_department, to_department, message, timestamp, is_read, priority, status 
-          FROM communications 
-          WHERE to_department = ? OR from_department = ? 
+$query = "SELECT comm_id as id, drug_id, from_department, to_department, message, timestamp, is_read, priority, status
+          FROM communications
+          WHERE to_department = ? OR from_department = ?
           ORDER BY timestamp DESC LIMIT 10";
 $stmt = mysqli_prepare($conn, $query);
 if ($stmt === false) {

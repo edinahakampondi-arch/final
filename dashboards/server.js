@@ -23,10 +23,11 @@ wss.on('connection', ws => {
                 await broadcastCommunications(data.department);
                 await broadcastPendingOrders(data.department);
                 await broadcastAlerts(data.department);
-            } else if (data.type === 'new_message' || data.type === 'request_update' || data.type === 'new_checkout') {
-                await broadcastCommunications(data.department);
-                await broadcastPendingOrders(data.department);
-                await broadcastAlerts(data.department);
+        } else if (data.type === 'new_message' || data.type === 'request_update' || data.type === 'new_checkout') {
+            await broadcastCommunications(data.department);
+            await broadcastPendingOrders(data.department);
+            await broadcastAlerts(data.department);
+            await broadcastStats(data.department); // Real-time dashboard stats update
             }
         } catch (error) {
             console.error('Message error:', error);
@@ -84,15 +85,65 @@ async function broadcastPendingOrders(department) {
     }
 }
 
+async function broadcastStats(department) {
+    const conn = await mysql.createConnection(dbConfig);
+    try {
+        // Get total drugs count for the department
+        const [totalRows] = await conn.execute(
+            'SELECT COUNT(*) AS total_drugs FROM drugs WHERE department = ?',
+            [department]
+        );
+
+        // Get critical stock count (expired or expiring within 30 days)
+        const [criticalRows] = await conn.execute(
+            `SELECT COUNT(*) AS critical_stock
+             FROM drugs
+             WHERE department = ?
+             AND (
+                 expiry_date <= CURDATE()
+                 OR expiry_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 30 DAY)
+             )`,
+            [department]
+        );
+
+        // Get safe stock count (expiring after 2 months)
+        const [safeRows] = await conn.execute(
+            `SELECT COUNT(*) AS safe_stock
+             FROM drugs
+             WHERE department = ?
+             AND expiry_date > DATE_ADD(CURDATE(), INTERVAL 2 MONTH)`,
+            [department]
+        );
+
+        const statsData = {
+            total_drugs: totalRows[0].total_drugs,
+            critical_stock: criticalRows[0].critical_stock,
+            safe_stock: safeRows[0].safe_stock
+        };
+
+        const client = clients.get(department);
+        if (client && client.readyState === WebSocket.OPEN) {
+            client.send(JSON.stringify({
+                type: 'dashboard_stats',
+                stats: statsData
+            }));
+        }
+    } catch (error) {
+        console.error('Broadcast stats error:', error);
+    } finally {
+        await conn.end();
+    }
+}
+
 async function broadcastAlerts(department) {
     const conn = await mysql.createConnection(dbConfig);
     try {
         const [rows] = await conn.execute(
-            `SELECT drug_name, department, current_stock, min_stock, status, 
+            `SELECT drug_name, department, current_stock, min_stock, status,
                     DATEDIFF(expiry_date, CURDATE()) AS days_to_expiry
-             FROM drugs 
-             WHERE (current_stock <= min_stock 
-                    OR (expiry_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY) 
+             FROM drugs
+             WHERE (current_stock <= min_stock
+                    OR (expiry_date <= DATE_ADD(CURDATE(), INTERVAL 30 DAY)
                         AND expiry_date >= CURDATE()))
                    AND status != 'expired'`,
             []

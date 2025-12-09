@@ -1,0 +1,18 @@
+<!-- predict.php -->
+<h2>Run Prediction</h2>
+
+<form action="predict.php" method="GET">
+    <label>Select Drug</label>
+    <select name="drug" required class="border p-2 rounded">
+        <?php
+        // Pull all drug names from DB
+        $conn = new mysqli("localhost","root","","your_db");
+        $result = $conn->query("SELECT DISTINCT drug_name FROM drugs ORDER BY drug_name ASC");
+        while($row = $result->fetch_assoc()) {
+            echo "<option value=\"{$row['drug_name']}\">{$row['drug_name']}</option>";
+        }
+        ?>
+    </select>
+
+    <button type="submit" class="bg-purple-600 text-white px-4 py-2 rounded">Predict</button>
+</form>

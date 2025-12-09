@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>ARIMA Demand Prediction</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <h2>6-Month Demand Forecast (ARIMA)</h2>
+  <canvas id="forecastChart" width="800" height="400"></canvas>
+
+  <script>
+  // Get drug name from URL
+  const params = new URLSearchParams(window.location.search);
+  const drug = params.get("drug");
+
+  async function getForecast() {
+    const res = await fetch(`http://127.0.0.1:8000/predict/${encodeURIComponent(drug)}`);
+    const data = await res.json();
+
+    if (data.error) {
+      alert(data.error);
+      return;
+    }
+
+    const ctx = document.getElementById('forecastChart').getContext('2d');
+    new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: data.months,
+        datasets: [{
+          label: `Predicted Demand (${data.drug})`,
+          data: data.predictions,
+          borderColor: 'blue',
+          fill: false,
+          tension: 0.3
+        }]
+      },
+      options: {
+        plugins: {
+          title: {
+            display: true,
+            text: `Next 6-Month Forecast (ARIMA Model)`
+          }
+        },
+        scales: {
+          y: { beginAtZero: true }
+        }
+      }
+    });
+  }
+
+  getForecast();
+  </script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+1. Activate virtual environment: .venv\Scripts\activate
+
+2. Install dependencies (if not already installed):
+   pip install -r requirements.txt
+
+3. Run the prediction API:
+   uvicorn app:app --host 0.0.0.0 --port 8001
+
+or change port when one gets issues uvicorn app:app --host 0.0.0.0 --port 8000
+
+
+4. To stop the app: Press Ctrl + c
+
+5. Deactivate virtual environment: deactivate
+
+Note: Ensure MySQL database is running and accessible at localhost with:
+   - Host: localhost
+   - User: root
+   - Password: (empty)
+   - Database: system
+
+
+
+

@@ -1,0 +1,57 @@
+<?php
+$drug = urlencode($_GET['drug']);
+$api = "http://127.0.0.1:8000/predict/$drug";
+$response = file_get_contents($api);
+$data = json_decode($response, true);
+?>
+<!DOCTYPE html>
+<html>
+<head>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+
+<body class="p-6">
+
+<h2 class="text-xl font-bold mb-4">Prediction for: <?php echo $_GET['drug']; ?></h2>
+
+<?php if(isset($data['error'])) { ?>
+    <p class="text-red-600"><?php echo $data['error']; ?></p>
+<?php } else { ?>
+
+    <canvas id="forecastChart" height="140"></canvas>
+
+    <script>
+        const months = <?php echo json_encode($data['months']); ?>;
+        const preds  = <?php echo json_encode($data['predictions']); ?>;
+
+        const ctx = document.getElementById("forecastChart").getContext("2d");
+        new Chart(ctx, {
+            type: "line",
+            data: {
+                labels: months,
+                datasets: [{
+                    label: "Predicted Demand",
+                    data: preds,
+                    borderColor: "rgb(99, 102, 241)",
+                    borderWidth: 2,
+                    tension: 0.3
+                }]
+            }
+        });
+    </script>
+
+    <h3 class="font-semibold mt-6">Prediction Table</h3>
+
+    <table border="1" class="mt-3" cellpadding="8">
+        <tr><th>Month</th><th>Forecast</th></tr>
+        <?php
+        for($i=0;$i<count($data['months']);$i++){
+            echo "<tr><td>{$data['months'][$i]}</td><td>{$data['predictions'][$i]}</td></tr>";
+        }
+        ?>
+    </table>
+
+<?php } ?>
+
+</body>
+</html>
