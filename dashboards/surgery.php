@@ -220,7 +220,7 @@ mysqli_stmt_close($stmt);
                     <i data-lucide="users" class="h-4 w-4 text-green-600"></i>
                 </div>
                 <div class="p-4 pt-0">
-                    <div class="text-2xl font-bold text-green-600">5</div>
+                    <div class="text-2xl font-bold text-green-600">6</div>
                     <p class="text-xs text-gray-500">Connected units</p>
                 </div>
             </div>

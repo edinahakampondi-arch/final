@@ -22,7 +22,7 @@ if ($request_id <= 0) {
     exit;
 }
 
-$query = "SELECT status, from_department FROM borrowing_requests WHERE id = $request_id";
+$query = "SELECT status, from_department FROM borrowing_requests WHERE request_id = $request_id";
 $result = mysqli_query($conn, $query);
 if (!$result || mysqli_num_rows($result) === 0) {
     http_response_code(400);
@@ -45,8 +45,8 @@ if ($_SESSION['department'] !== 'Admin' && $_SESSION['department'] !== $request[
 }
 
 $rejected_time = date('Y-m-d H:i:s');
-$query = "UPDATE borrowing_requests SET status = 'Rejected', approved_time = '$rejected_time'
-          WHERE id = $request_id";
+$query = "UPDATE borrowing_requests SET status = 'Rejected', approved_time = '$rejected_time' 
+          WHERE request_id = $request_id";
 if (mysqli_query($conn, $query)) {
     echo json_encode(['success' => 'Request rejected successfully']);
 } else {

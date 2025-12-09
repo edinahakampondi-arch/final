@@ -22,7 +22,7 @@ if ($request_id <= 0) {
     exit;
 }
 
-$query = "SELECT status, to_department FROM borrowing_requests WHERE id = $request_id";
+$query = "SELECT status, to_department FROM borrowing_requests WHERE request_id = $request_id";
 $result = mysqli_query($conn, $query);
 if (!$result || mysqli_num_rows($result) === 0) {
     http_response_code(400);
@@ -43,7 +43,7 @@ if ($_SESSION['department'] !== $request['to_department']) {
     exit;
 }
 
-$query = "DELETE FROM borrowing_requests WHERE id = $request_id";
+$query = "DELETE FROM borrowing_requests WHERE request_id = $request_id";
 if (mysqli_query($conn, $query)) {
     echo json_encode(['success' => 'Request canceled successfully']);
 } else {

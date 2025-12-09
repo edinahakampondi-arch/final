@@ -22,17 +22,13 @@ if ($request_id <= 0) {
     exit;
 }
 
-$query = "SELECT id, drug_name, quantity, from_department, to_department, status, expiry_date
-          FROM borrowing_requests WHERE id = ?";
-error_log("DEBUG: approve_request.php - Executing query: $query");
-
+$query = "SELECT drug_name, quantity, from_department, to_department, status, expiry_date 
+          FROM borrowing_requests WHERE request_id = ?";
 $stmt = mysqli_prepare($conn, $query);
 if (!$stmt) {
-    $error = mysqli_error($conn);
-    error_log("Fetch Request Error: Failed to prepare query - " . $error);
-    error_log("DEBUG: approve_request.php - Connection status: " . (mysqli_ping($conn) ? 'OK' : 'FAILED'));
+    error_log("Fetch Request Error: " . mysqli_error($conn));
     http_response_code(500);
-    echo json_encode(['error' => 'Database error: Failed to prepare query - ' . $error]);
+    echo json_encode(['error' => 'Database error: Failed to prepare query']);
     exit;
 }
 mysqli_stmt_bind_param($stmt, "i", $request_id);
@@ -127,8 +123,8 @@ try {
 
     error_log("DEBUG: approve_request.php - Deducted {$request['quantity']} from lending department '{$request['from_department']}'");
 
-    // Check if drug exists in borrowing department
-    $query = "SELECT id FROM drugs
+    // Check if drug exists in borrowing department (use drug_id instead of id)
+    $query = "SELECT drug_id FROM drugs 
               WHERE drug_name = ? AND department = ?";
     $stmt = mysqli_prepare($conn, $query);
     if (!$stmt) {
@@ -184,8 +180,8 @@ try {
 
     // Update request status
     $approved_time = date('Y-m-d H:i:s');
-    $query = "UPDATE borrowing_requests SET status = 'Approved', approved_time = ?
-              WHERE id = ?";
+    $query = "UPDATE borrowing_requests SET status = 'Approved', approved_time = ? 
+              WHERE request_id = ?";
     $stmt = mysqli_prepare($conn, $query);
     if (!$stmt) {
         throw new Exception('Failed to prepare status update: ' . mysqli_error($conn));
